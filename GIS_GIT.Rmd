@@ -1,0 +1,185 @@
+---
+title: "GIS_"
+author: "ayandabuso"
+date: "2025-03-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#GIS project plan
+ 
+
+```{r}
+# #load necessary packages
+# install.packages(c("tidyverse", "sf", "lwgeom", "terra", "stars", "exactextractr"))
+# install.packages(c("cowplot", "hrbrthemes", "knitr", "leaflet", "htmltools", "rosm", "ggspatial", "rnaturalearth", "mapview", "tmap"))
+# install.packages(c("tidyverse", "sp", "raster", "biomod2", "dismo", "rgdal", "rnaturalearth", "rnaturalearthdata"))
+# install.packages("terra") 
+
+library(tidyverse)   
+library(sf)          
+#library(raster)      
+library(biomod2)     
+library(dismo)      
+#library(rgdal)       
+library(terra)    
+library(rinat)
+```
+
+```{r}
+# Species of interest
+species_name <- "Protea cynaroides"
+```
+
+```{r}
+# Fetching occurrence data from iNaturalist (limit to 100 records)
+occurrence_data <- get_inat_obs(query = species_name, maxresults = 100)
+```
+
+```{r}
+# Inspecting the data
+head(occurrence_data)
+```
+
+```{r}
+# Defining the extent for our study area
+extent_area <- ext(16, 30, -35, -32)  # Adjust depending on your region of interest
+```
+
+
+```{r}
+#Mannually extracting environmental data from woldclim
+file_path<-"/Users/ayandabuso/Documents/GIT/GIS_Project/Wc2.1_10m_bio"
+clim_data <- terra::rast(list.files(file_path, pattern = "\\.tif$", full.names = TRUE))
+
+clim_data <- crop(clim_data, extent_area)
+print(clim_data)
+```
+
+```{r}
+# Converting occurrence points to spatial points
+occurrence_data = st_as_sf(occurrence_data, coords = c("longitude", "latitude"), crs = 4326)
+
+# st_coordinates(occurrence_data) <- ~longitude+latitude  # Replace with actual columns from your data
+# proj4string(occurrence_data) <- CRS("+proj=longlat +datum=WGS84")  # Define the projection
+```
+
+```{r}
+# Converting occurrence_data to a SpatVector
+occurrence_vect <- vect(occurrence_data)
+```
+
+```{r}
+# Extracting climate values at occurrence points
+clim_values <- extract(clim_data, occurrence_vect)
+head(clim_values)
+```
+
+```{r}
+# Creating a data frame with occurrence and climate data
+occ_clim_data <- data.frame(occurrence_data, clim_values)
+```
+
+```{r}
+# Checking the column names in occ_clim_data to ensure 'longitude', 'latitude', and 'presence' exist
+colnames(occ_clim_data)
+```
+
+```{r}
+#creating the presence/ absence colomn
+occ_clim_data$presence <- rep(1, nrow(occ_clim_data))
+occ_clim_data$presence <- ifelse(is.na(occ_clim_data$presence), 0, 1)
+# Checking the presence/absence data
+head(occ_clim_data$presence)
+```
+
+
+```{r}
+# Now assigning the response variable (species presence/absence) 
+resp_var <- occ_clim_data$presence
+expl_var <- clim_data  # clim_data is already a SpatRaster
+# Check the structure
+str(expl_var)
+```
+
+```{r}
+# Converting coordinates to a matrix format for BIOMOD
+resp_xy <- st_coordinates(occurrence_data) # as.matrix(occ_clim_data[, c("longitude", "latitude")])
+print(class(clim_data))
+```
+
+
+```{r}
+# Formatting Data for BIOMOD
+#install.packages("biomod2")
+occ_clim_data_biomod <- BIOMOD_FormatingData(
+  resp.var = resp_var,              # Response variable (species presence/absence)
+  expl.var = expl_var,              # Explanatory variables (climate data)
+  resp.xy = resp_xy,                # Coordinates of occurrence points
+  resp.name = species_name,         # Define the species name
+  PA.nb.rep = 1,                    # Number of pseudo-absences
+  PA.strategy = 'random'            # Random pseudo-absence selection
+)
+```
+
+
+```{r}
+# Checking if maxent.jar is in the working directory
+maxent_path <- file.path(getwd(), "maxent.jar")
+use_maxent <- file.exists(maxent_path)  # Use Maxent only if the JAR file is present
+```
+
+```{r}
+# Defining the models to use 
+selected_models <- c("GLM", "GAM", "RF")
+if (use_maxent) selected_models <- c(selected_models, "MAXENT")
+```
+
+```{r}
+# Running the BIOMOD_Modeling function 
+occ_clim_data_biomod_models <- BIOMOD_Modeling(
+  bm.format = occ_clim_data_biomod,                    
+  modeling.id = as.character(format(Sys.time(), "%s")), 
+  models = selected_models,                            
+  CV.strategy = "random",                              
+  CV.nb.rep = 1,                                       
+  CV.perc = 0.7,                                       
+  CV.do.full.models = TRUE,                           
+  prevalence = 0.5,                                 
+  metric.eval = c("KAPPA", "TSS", "ROC"),              
+  var.import = 3,                                   
+  scale.models = FALSE,                           
+  nb.cpu = 1,                                     
+  do.progress = TRUE                                   
+)
+```
+
+
+```{r}
+#Extracting evaluation scores
+occ_clim_data_biomod_models_scores <- get_evaluations(occ_clim_data_biomod_models)
+```
+
+```{r}
+# Printing the evaluation results
+print(occ_clim_data_biomod_models_scores)
+print(occ_clim_data_biomod_models)
+```
+
+```{r}
+get_built_models(occ_clim_data_biomod_models)
+print(class(clim_data))
+```
+
+```{r}
+#Plotting Projections
+occ_clim_data_biomod_proj <- BIOMOD_Projection(
+  bm.mod = occ_clim_data_biomod_models,  
+  proj.name = "Protea_cynaroides_projection",  
+  new.env = clim_data,  
+  nb.cpu = 1  
+)
+plot(occ_clim_data_biomod_proj, nc = 2)
+```
